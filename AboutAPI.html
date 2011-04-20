@@ -129,7 +129,6 @@
 <ul>
 <li>DB操作、WebAPIへのリクエストなどプログラム内部の操作を抽象化</li>
 <li>使い方を誤ると例外が発生</li>
-<li>Web::Controller、CLIなどから直接実行しないほうが良い</li>
 <li>アプリケーションに必要な機能を実装する</li>
 </ul>
 
@@ -144,6 +143,220 @@
 <li>Web::Controller、CLIなどがこれを実行する</li>
 </ul>
 
+
+  </section>
+  <div class="attribution hidden">
+    <a href="">
+      
+    </a>
+  </div>
+</div>
+
+    
+      <div class="slide">
+  <section>
+    <h1>こんな感じで使いたい</h1>
+
+<p>Modelはこんな感じ。</p>
+
+<pre><code>my $user = App::Model::User-&gt;find('okamuuu');
+
+eval { $user-&gt;buy_item('どくばり') };
+Carp::croak $@ if $@; # not enough money!!
+</code></pre>
+
+<p>APIはこんな感じ</p>
+
+<pre><code>sub dispatch_hoge {
+
+    my $api = App::Api::User-&gt;new;
+
+    ### ユーザーの所持金、保持可能アイテム数などの妥当性チェック
+    ### 問題があればerror_msgsにそのエラー内容を格納
+    ### 問題がなければstatus_msgsに処理結果を格納。
+    ### DB更新に伴うトランザクションを
+    $api-&gt;user_buy_item( user =&gt; $user, item =&gt; 'どくばり', item_count =&gt; 1 );
+
+    if ( $api-&gt;has_error_msgs ) {
+        $c-&gt;stash-&gt;error_msgs($api-&gt;error_msgs); # 所持金が不足しています
+    }
+    else if {
+        $c-&gt;flash-&gt;status_msgs($api-&gt;status_msgs); # どくばりを購入しました
+    }
+
+    ### $apiがスコープの終端でDESTROY. 
+}
+</code></pre>
+
+  </section>
+  <div class="attribution hidden">
+    <a href="">
+      
+    </a>
+  </div>
+</div>
+
+    
+      <div class="slide">
+  <section>
+    <h1>実装例</h1>
+
+<p>App::Api::Base</p>
+
+<pre><code>package App::Api::Base;
+use strict;
+use warnings;
+use App::Api::Msg;
+use App::Api::DebugMsg;
+use Class::Accessor::Lite 0.05 ( 
+    ro =&gt; [qw/log_path/],
+    rw =&gt; [qw/error_msg status_msg debug_msg/] );
+
+sub new {
+    my ($class, %args) = @_;
+
+    bless {
+        log_path   =&gt; $args{log_path},
+        status_msg =&gt; Sid::Api::Msg-&gt;new,
+        error_msg  =&gt; Sid::Api::Msg-&gt;new,
+        debug_msg  =&gt; Sid::Api::DebugMsg-&gt;new,
+    }, $class;
+}
+
+sub set_status_msgs {
+    my ( $self, @new_msgs ) = @_;
+    $self-&gt;status_msg-&gt;set_msgs(@new_msgs);
+    $self-&gt;debug_msg-&gt;set_msgs(@new_msgs);
+}
+
+sub set_error_msgs {
+    my ( $self, @new_msgs ) = @_;
+    $self-&gt;error_msg-&gt;set_msgs(@new_msgs);
+    $self-&gt;debug_msg-&gt;set_msgs(@new_msgs);
+}
+
+sub set_debug_msgs {
+    my ( $self, @new_msgs ) = @_;
+    $self-&gt;debug_msg-&gt;set_msgs(@new_msgs);
+}
+
+sub DESTROY {
+    my $self = shift;
+
+    if ( $self-&gt;log_path and $self-&gt;debug_msg-&gt;has_msgs ) {
+
+        my $fh = IO::File-&gt;new( $self-&gt;log_path, 'a');
+
+        $fh-&gt;print( '-' x 10, "\n" );
+        $fh-&gt;print($_) for map { "$_\n" } $self-&gt;debug_msg-&gt;get_msgs();
+        $fh-&gt;print("\n");
+        $fh-&gt;close;
+    }
+    elsif ( $self-&gt;debug_msg-&gt;has_msgs ) {
+        warn $_ for $self-&gt;debug_msg-&gt;get_msgs(); 
+    }
+    else {
+        return;
+    }
+}
+
+1;
+</code></pre>
+
+<p>App::Api::Msg</p>
+
+<pre><code>package App::Api::Msg;
+use strict;
+use warnings;
+
+sub new { return bless { _msgs =&gt; [] }, $_[0]; }
+
+sub get_msgs { @{ $_[0]-&gt;{_msgs} }  }
+
+sub has_msgs { scalar $_[0]-&gt;get_msgs }
+
+sub set_msgs {
+    my ( $self, @new_msgs ) = @_;
+    $self-&gt;set_msg($_) for @new_msgs;
+}
+
+sub set_msg { 
+    my ( $self, $new_msg ) = @_;
+    $self-&gt;{_msgs} = [ $self-&gt;get_msgs, $self-&gt;_edit_preset_msg($new_msg) ];
+}
+
+sub _edit_preset_msg { return $_[1] } # hook
+
+1;
+</code></pre>
+
+<p>App::Api::DebugMsg</p>
+
+<pre><code>package App::Api::DebugMsg;
+use strict;
+use warnings;
+use parent 'App::Api::Msg';
+use Time::HiRes ();
+
+sub new {
+    my $class = shift;
+    my $self = $class-&gt;SUPER::new;
+    $self-&gt;{_start} = [Time::HiRes::gettimeofday];
+    return $self;
+}
+
+sub start { $_[0]-&gt;{_start} }
+
+sub _edit_preset_msg {
+    my ($self, $msg) = @_;
+
+    my $now = _now();
+    my $elapsed = Time::HiRes::tv_interval($self-&gt;start, [Time::HiRes::gettimeofday]);
+
+    return "[$now] $msg ( $elapsed sec )";
+}
+
+### copied from Log::Minimal
+sub _now {
+    my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) =
+      localtime(time);
+
+    my $time = sprintf(
+        "%04d-%02d-%02dT%02d:%02d:%02d",
+        $year + 1900,
+        $mon + 1, $mday, $hour, $min, $sec
+    );
+}
+
+1;
+</code></pre>
+
+  </section>
+  <div class="attribution hidden">
+    <a href="">
+      
+    </a>
+  </div>
+</div>
+
+    
+      <div class="slide">
+  <section>
+    <h1>私は開発中にこんなログを見ています。</h1>
+
+<pre><code>[2011-04-20T20:07:04] start create document ( 0.000108 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] end create document ( 0.087972 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] start write_html ( 0.088269 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] start write category readme ( 0.088326 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] end write category readme ( 0.262469 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] start write category 01 ( 0.262537 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] end write category 01 ( 0.264307 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] start write category 02 ( 0.264377 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] end write category 02 ( 0.265846 sec ) at lib/Sid/Api/Base.pm line 51.
+[2011-04-20T20:07:04] end write_html ( 0.265913 sec ) at lib/Sid/Api/Base.pm line 51.
+</code></pre>
+
+<p>もたもたしている処理を発見するのにもたもたしたくないです。</p>
 
   </section>
   <div class="attribution hidden">
@@ -187,6 +400,7 @@
 <li>ユーザーがどのような操作をして、その処理は何秒かかるのか？</li>
 <li>思いつくのはDecoratorパターン。どのように実装する？</li>
 <li>Modelという名前空間よりも上位となるレイヤーが欲しい</li>
+<li>本番運営中でもAPIが終了するまでにx秒かかったらログ出力させるとか</li>
 </ul>
 
 
@@ -229,8 +443,9 @@
 <ul>
 <li>Web::ControllerとModelの間にもう一つレイヤーが欲しい</li>
 <li>APIという名前に固執はしないが、どう考えてもAPIという名前がしっくりする</li>
-<li>でもAPIとか言うと、「何だよAPIって？」とか言われる</li>
-<li>必要なのは例外処理やロギングの処理をどこに実装するかというルール</li>
+<li>でもAPIとか言うと、「何だよAPIって？」とか言われるけれど</li>
+<li>必要なのは例外処理、ロギング、トランザクションの処理をどこに実装するかというルール</li>
+<li>とりあえずAPIと呼ぶ事にする</li>
 </ul>
 
 
@@ -269,11 +484,13 @@
     <h1>課題</h1>
 
 <ul>
-<li>トランザクションはどこに書く？</li>
-<li>App::Api内でトランザクションしてね、というルールがいいのか？</li>
-<li>そもそもトランザクションって抽象化できてない？</li>
-<li>version number使って楽観ロックすると抽象化できる</li>
-<li>実は自分の家でやってる俺々プロジェクトでしか実装したことありません。</li>
+<li>ログの記述方法が独創的すぎる</li>
+<li>トランザクションをAPIで書くというルールでよいか？</li>
+<li>そもそもDB操作はModel内で抽象化すれば一番よい気がする。</li>
+<li>それ、version number使って楽観ロックすると抽象化できる、かも。</li>
+<li>トランザクションが入れ子とか、実装した事ないからわかりません。</li>
+<li>自分の家でやってる俺々プロジェクトでしか実装したことありません。</li>
+<li>だから良い手法かどうかは不明です。</li>
 </ul>
 
 
@@ -300,8 +517,6 @@
 
 
 <p>おしまい</p>
-
-<h1>}}} images/test.png</h1>
 
   </section>
   <div class="attribution hidden">

@@ -18,7 +18,6 @@ http://d.hatena.ne.jp/okamuuu
 
  * DB操作、WebAPIへのリクエストなどプログラム内部の操作を抽象化
  * 使い方を誤ると例外が発生
- * Web::Controller、CLIなどから直接実行しないほうが良い
  * アプリケーションに必要な機能を実装する
 
 APIをこう考える
@@ -28,6 +27,187 @@ APIをこう考える
  * どんな使い方をしても例外は起きないように実装する
  * 例外の代わりにstatus messages, error messagesとして保持する
  * Web::Controller、CLIなどがこれを実行する
+
+!SLIDE
+
+# こんな感じで使いたい
+
+Modelはこんな感じ。
+
+    my $user = App::Model::User->find('okamuuu');
+    
+    eval { $user->buy_item('どくばり') };
+    Carp::croak $@ if $@; # not enough money!!
+
+APIはこんな感じ
+
+    sub dispatch_hoge {
+
+        my $api = App::Api::User->new;
+
+        ### ユーザーの所持金、保持可能アイテム数などの妥当性チェック
+        ### 問題があればerror_msgsにそのエラー内容を格納
+        ### 問題がなければstatus_msgsに処理結果を格納。
+        ### DB更新に伴うトランザクションを
+        $api->user_buy_item( user => $user, item => 'どくばり', item_count => 1 );
+
+        if ( $api->has_error_msgs ) {
+            $c->stash->error_msgs($api->error_msgs); # 所持金が不足しています
+        }
+        else if {
+            $c->flash->status_msgs($api->status_msgs); # どくばりを購入しました
+        }
+        
+        ### $apiがスコープの終端でDESTROY. 
+    }
+
+!SLIDE
+
+# 実装例
+
+App::Api::Base
+
+    package App::Api::Base;
+    use strict;
+    use warnings;
+    use App::Api::Msg;
+    use App::Api::DebugMsg;
+    use Class::Accessor::Lite 0.05 ( 
+        ro => [qw/log_path/],
+        rw => [qw/error_msg status_msg debug_msg/] );
+    
+    sub new {
+        my ($class, %args) = @_;
+        
+        bless {
+            log_path   => $args{log_path},
+            status_msg => Sid::Api::Msg->new,
+            error_msg  => Sid::Api::Msg->new,
+            debug_msg  => Sid::Api::DebugMsg->new,
+        }, $class;
+    }
+    
+    sub set_status_msgs {
+        my ( $self, @new_msgs ) = @_;
+        $self->status_msg->set_msgs(@new_msgs);
+        $self->debug_msg->set_msgs(@new_msgs);
+    }
+    
+    sub set_error_msgs {
+        my ( $self, @new_msgs ) = @_;
+        $self->error_msg->set_msgs(@new_msgs);
+        $self->debug_msg->set_msgs(@new_msgs);
+    }
+    
+    sub set_debug_msgs {
+        my ( $self, @new_msgs ) = @_;
+        $self->debug_msg->set_msgs(@new_msgs);
+    }
+    
+    sub DESTROY {
+        my $self = shift;
+        
+        if ( $self->log_path and $self->debug_msg->has_msgs ) {
+    
+            my $fh = IO::File->new( $self->log_path, 'a');
+            
+            $fh->print( '-' x 10, "\n" );
+            $fh->print($_) for map { "$_\n" } $self->debug_msg->get_msgs();
+            $fh->print("\n");
+            $fh->close;
+        }
+        elsif ( $self->debug_msg->has_msgs ) {
+            warn $_ for $self->debug_msg->get_msgs(); 
+        }
+        else {
+            return;
+        }
+    }
+    
+    1;
+
+App::Api::Msg
+    
+    package App::Api::Msg;
+    use strict;
+    use warnings;
+    
+    sub new { return bless { _msgs => [] }, $_[0]; }
+    
+    sub get_msgs { @{ $_[0]->{_msgs} }  }
+    
+    sub has_msgs { scalar $_[0]->get_msgs }
+    
+    sub set_msgs {
+        my ( $self, @new_msgs ) = @_;
+        $self->set_msg($_) for @new_msgs;
+    }
+    
+    sub set_msg { 
+        my ( $self, $new_msg ) = @_;
+        $self->{_msgs} = [ $self->get_msgs, $self->_edit_preset_msg($new_msg) ];
+    }
+    
+    sub _edit_preset_msg { return $_[1] } # hook
+    
+    1;
+
+App::Api::DebugMsg
+
+    package App::Api::DebugMsg;
+    use strict;
+    use warnings;
+    use parent 'App::Api::Msg';
+    use Time::HiRes ();
+    
+    sub new {
+        my $class = shift;
+        my $self = $class->SUPER::new;
+        $self->{_start} = [Time::HiRes::gettimeofday];
+        return $self;
+    }
+    
+    sub start { $_[0]->{_start} }
+    
+    sub _edit_preset_msg {
+        my ($self, $msg) = @_;
+    
+        my $now = _now();
+        my $elapsed = Time::HiRes::tv_interval($self->start, [Time::HiRes::gettimeofday]);
+    
+        return "[$now] $msg ( $elapsed sec )";
+    }
+    
+    ### copied from Log::Minimal
+    sub _now {
+        my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) =
+          localtime(time);
+    
+        my $time = sprintf(
+            "%04d-%02d-%02dT%02d:%02d:%02d",
+            $year + 1900,
+            $mon + 1, $mday, $hour, $min, $sec
+        );
+    }
+    
+    1;
+
+!SLIDE
+
+# 私は開発中にこんなログを見ています。
+
+    [2011-04-20T20:07:04] start create document ( 0.000108 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] end create document ( 0.087972 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] start write_html ( 0.088269 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] start write category readme ( 0.088326 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] end write category readme ( 0.262469 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] start write category 01 ( 0.262537 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] end write category 01 ( 0.264307 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] start write category 02 ( 0.264377 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] end write category 02 ( 0.265846 sec ) at lib/Sid/Api/Base.pm line 51.
+    [2011-04-20T20:07:04] end write_html ( 0.265913 sec ) at lib/Sid/Api/Base.pm line 51.
+
+もたもたしている処理を発見するのにもたもたしたくないです。
 
 !SLIDE
 
@@ -49,6 +229,7 @@ APIをこう考える
  * ユーザーがどのような操作をして、その処理は何秒かかるのか？
  * 思いつくのはDecoratorパターン。どのように実装する？
  * Modelという名前空間よりも上位となるレイヤーが欲しい
+ * 本番運営中でもAPIが終了するまでにx秒かかったらログ出力させるとか
 
 !SLIDE
 
@@ -67,8 +248,9 @@ APIをこう考える
  
  * Web::ControllerとModelの間にもう一つレイヤーが欲しい
  * APIという名前に固執はしないが、どう考えてもAPIという名前がしっくりする
- * でもAPIとか言うと、「何だよAPIって？」とか言われる
- * 必要なのは例外処理やロギングの処理をどこに実装するかというルール
+ * でもAPIとか言うと、「何だよAPIって？」とか言われるけれど
+ * 必要なのは例外処理、ロギング、トランザクションの処理をどこに実装するかというルール
+ * とりあえずAPIと呼ぶ事にする
 
 !SLIDE
 
@@ -83,11 +265,13 @@ APIをこう考える
 
 # 課題
 
- * トランザクションはどこに書く？
- * App::Api内でトランザクションしてね、というルールがいいのか？
- * そもそもトランザクションって抽象化できてない？
- * version number使って楽観ロックすると抽象化できる
- * 実は自分の家でやってる俺々プロジェクトでしか実装したことありません。
+ * ログの記述方法が独創的すぎる
+ * トランザクションをAPIで書くというルールでよいか？
+ * そもそもDB操作はModel内で抽象化すれば一番よい気がする。
+ * それ、version number使って楽観ロックすると抽象化できる、かも。
+ * トランザクションが入れ子とか、実装した事ないからわかりません。
+ * 自分の家でやってる俺々プロジェクトでしか実装したことありません。
+ * だから良い手法かどうかは不明です。
  
 !SLIDE
 
