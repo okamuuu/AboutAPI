@@ -1,6 +1,5 @@
 AboutAPI
 ========
 
-俺とModelとAPI
 
-
+ruby製品のkeydownを使ってます。
