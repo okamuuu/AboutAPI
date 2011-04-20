@@ -65,6 +65,15 @@ APIはこんな感じ
 
 # 実装例
 
+App::Api::User
+
+    package App::Api::User;
+    use strict;
+    use warnings;
+    use parent 'App::Api::Base';
+
+    sub buy_item { ... }
+
 App::Api::Base
 
     package App::Api::Base;
