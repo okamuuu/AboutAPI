@@ -45,10 +45,6 @@ APIはこんな感じ
 
         my $api = App::Api::User->new;
 
-        ### ユーザーの所持金、保持可能アイテム数などの妥当性チェック
-        ### 問題があればerror_msgsにそのエラー内容を格納
-        ### 問題がなければstatus_msgsに処理結果を格納。
-        ### DB更新に伴うトランザクションを
         $api->user_buy_item( user => $user, item => 'どくばり', item_count => 1 );
 
         if ( $api->has_error_msgs ) {
